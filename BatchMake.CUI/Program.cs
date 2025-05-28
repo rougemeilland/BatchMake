@@ -324,7 +324,7 @@ namespace BatchMake.CUI2
                 var temporaryDirectories = new Dictionary<int, DirectoryPath>();
                 try
                 {
-                    var commandSpecs = ParseCommandLines(lines[nextIndex..], dependency, temporaryFiles, temporaryDirectories);
+                    var commandSpecs = ParseCommandLines(lines[nextIndex..], dependency, temporaryFiles, temporaryDirectories, verbose);
                     if (verbose)
                     {
                         foreach (var commandSpec in commandSpecs)
@@ -352,9 +352,18 @@ namespace BatchMake.CUI2
                 finally
                 {
                     foreach (var temporaryFile in temporaryFiles.Values)
+                    {
                         temporaryFile.SafetyDelete();
+                        if (verbose)
+                            PrintInformationMessage($"Deleted tempprary file \"{temporaryFile.FullName}\"");
+                    }
+
                     foreach (var temporaryDirectory in temporaryDirectories.Values)
+                    {
                         temporaryDirectory.SafetyDelete(true);
+                        if (verbose)
+                            PrintInformationMessage($"Deleted tempprary directory \"{temporaryDirectory.FullName}\"");
+                    }
                 }
             }
         }
@@ -396,7 +405,7 @@ namespace BatchMake.CUI2
             return lines.Length;
         }
 
-        private static IEnumerable<CommandSpec> ParseCommandLines(ReadOnlyMemory<string> lines, Dependency dependency, IDictionary<int, FilePath> temporaryFiles, IDictionary<int, DirectoryPath> temporaryDirectories)
+        private static IEnumerable<CommandSpec> ParseCommandLines(ReadOnlyMemory<string> lines, Dependency dependency, IDictionary<int, FilePath> temporaryFiles, IDictionary<int, DirectoryPath> temporaryDirectories, bool verbose)
         {
             var commandTexts = new List<string>();
             var redirecttFromStdin = (FilePath?)null;
@@ -405,7 +414,7 @@ namespace BatchMake.CUI2
 
             foreach (var line in Filter(lines))
             {
-                var trimmedLine = EvalueVariable(line.Trim(), dependency, temporaryFiles, temporaryDirectories);
+                var trimmedLine = EvalueVariable(line.Trim(), dependency, temporaryFiles, temporaryDirectories, verbose);
                 if (trimmedLine.Length <= 0)
                 {
                     foreach (var commandSpec in Flush(false))
@@ -469,7 +478,7 @@ namespace BatchMake.CUI2
                 }
             }
 
-            static string EvalueVariable(string text, Dependency dependency, IDictionary<int, FilePath> temporaryFiles, IDictionary<int,DirectoryPath> temporaryDirectories)
+            static string EvalueVariable(string text, Dependency dependency, IDictionary<int, FilePath> temporaryFiles, IDictionary<int,DirectoryPath> temporaryDirectories, bool verbose)
             {
                 return
                     GetVariableSpecPattern().Replace(
@@ -524,6 +533,8 @@ namespace BatchMake.CUI2
                                     {
                                         temporaryFile = FilePath.CreateTemporaryFile();
                                         temporaryFiles.Add(index.Value, temporaryFile);
+                                        if (verbose)
+                                            PrintInformationMessage($"Created temprary file \"{temporaryFile.FullName}\".");
                                     }
 
                                     return ShortenFilePathNames(temporaryFile).EncodeCommandLineArgument();
@@ -538,6 +549,8 @@ namespace BatchMake.CUI2
                                     {
                                         temporaryDirectory = DirectoryPath.CreateTemporaryDirectory();
                                         temporaryDirectories.Add(index.Value, temporaryDirectory);
+                                        if (verbose)
+                                            PrintInformationMessage($"Created temprary directory \"{temporaryDirectory.FullName}\".");
                                     }
 
                                     try
