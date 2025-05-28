@@ -399,3 +399,9 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+launchSettings.json
+
+/Experiment/Program.cs
+/BatchMake.CUI/test1.bat
+/BatchMake.CUI/test2.bat
