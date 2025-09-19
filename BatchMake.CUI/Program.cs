@@ -1,243 +1,171 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Palmtree;
 using Palmtree.IO;
 using Palmtree.IO.Console;
 
-namespace BatchMake.CUI2
+namespace BatchMake.CUI
 {
-    internal partial class Program
+    internal static partial class Program
     {
-        private class Dependency
+        private enum StateOfParsingDependencyLines
         {
-            private class PathCollection
-                : IReadOnlyArray<FilePath>
-            {
-                private readonly IList<FilePath> _files;
-
-                public PathCollection()
-                {
-                    _files = [];
-                }
-
-                public FilePath this[int index] => _files[index];
-                public int Length => _files.Count;
-                public void Add(FilePath file) => _files.Add(file);
-                public IEnumerator<FilePath> GetEnumerator() => _files.GetEnumerator();
-                IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-            }
-
-            private readonly PathCollection _targets;
-            private readonly PathCollection _sources;
-
-            public Dependency()
-            {
-                _targets = new PathCollection();
-                _sources = new PathCollection();
-            }
-
-            public IReadOnlyArray<FilePath> Targets => _targets;
-            public IReadOnlyArray<FilePath> Sources => _sources;
-            public void AddTarget(FilePath target) => _targets.Add(target);
-            public void AddSource(FilePath source) => _sources.Add(source);
+            ParsingTargets = 0,
+            ParsingSources,
         }
 
-        private class CommandSpec
+        private static readonly char[] _pathDelimiters = ['/', '\\'];
+
+        private static int Main(string[] args)
         {
-            public CommandSpec(string commandLine, ISequentialInputByteStream? standardInput, ISequentialOutputByteStream? standardOutput, bool isPipedFromPreviousCommand, bool isPipedToNextCommand, FilePath? fileRedirectedToStandardInput, FilePath? fileRedirectedToStandardOutput)
+            if (TinyConsole.InputEncoding.CodePage != Encoding.UTF8.CodePage || TinyConsole.OutputEncoding.CodePage != Encoding.UTF8.CodePage)
             {
-                CommandLine = commandLine;
-                StandardInput = standardInput;
-                StandardOutput = standardOutput;
-                IsPipedFromPreviousCommand = isPipedFromPreviousCommand;
-                IsPipedToNextCommand = isPipedToNextCommand;
-                FileRedirectedToStandardInput = fileRedirectedToStandardInput;
-                FileRedirectedToStandardOutput = fileRedirectedToStandardOutput;
+                if (OperatingSystem.IsWindows())
+                    TinyConsole.WriteLog(LogCategory.Warning, "The encoding of standard input or output is not UTF8. Consider running the command \"chcp 65001\".");
+                else
+                    TinyConsole.WriteLog(LogCategory.Warning, "The encoding of standard input or standard output is not UTF8.");
             }
 
-            public string CommandLine { get; }
-            public ISequentialInputByteStream? StandardInput { get; }
-            public ISequentialOutputByteStream? StandardOutput { get; }
-            public bool IsPipedFromPreviousCommand { get; }
-            public bool IsPipedToNextCommand { get; }
-            public FilePath? FileRedirectedToStandardInput { get; }
-            public FilePath? FileRedirectedToStandardOutput { get; }
+            TinyConsole.DefaultTextWriter = ConsoleTextWriterType.StandardError;
 
-            public async Task Start()
-            {
-                var firstToken = CommandLine.SplitCommandLineArguments().Take(1).ToArray();
-                if (firstToken.Length <= 0)
-                    throw new Exception("An empty command line is specified.");
-                var commandName = firstToken[0].element;
-                var commandPath =
-                    ProcessUtility.WhereIs(commandName)
-                    ?? throw new Exception($"Executable file not found.: \"{commandName}\"");
-                var commandParameter = CommandLine[firstToken[0].end..].TrimStart();
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = ShortenFilePathNames(new FilePath(commandPath)),
-                    Arguments = commandParameter,
-                    CreateNoWindow = true,
-                    UseShellExecute = false,
-                    RedirectStandardInput = StandardInput is not null,
-                    RedirectStandardOutput = StandardOutput is not null,
-                    RedirectStandardError = true,
-                };
-                var process = StartProcess(startInfo, CommandLine);
-                try
-                {
-                    var task1 =
-                        Task.Run(
-                            () =>
-                            {
-                                if (StandardInput is not null)
-                                {
-                                    try
-                                    {
-                                        using var outStream = process.StandardInput.BaseStream.AsOutputByteStream();
-                                        CopyByteStream(StandardInput, outStream);
-                                    }
-                                    finally
-                                    {
-                                        StandardInput.Dispose();
-                                    }
-                                }
-                            });
-                    var task2 =
-                        Task.Run(
-                            () =>
-                            {
-                                if (StandardOutput is not null)
-                                {
-                                    try
-                                    {
-                                        using var inStream = process.StandardOutput.BaseStream.AsInputByteStream();
-                                        CopyByteStream(inStream, StandardOutput);
-                                    }
-                                    finally
-                                    {
-                                        StandardOutput.Dispose();
-                                    }
-                                }
-                            });
-                    var task3 =
-                        Task.Run(
-                            () =>
-                            {
-                                using var inStream = process.StandardError.BaseStream.AsInputByteStream();
-                                using var outStream = TinyConsole.OpenStandardError();
-                                CopyByteStream(inStream, outStream);
-                            });
-
-                    await Task.WhenAll(task1, task2, task3);
-                    await process.WaitForExitAsync();
-                    var exitCode = process.ExitCode;
-                    if (exitCode != 0)
-                        throw new Exception($"The process terminated abnormally.: exit-code={exitCode}, command-line=\"{CommandLine}\"");
-                }
-                finally
-                {
-                    process.Dispose();
-                }
-
-                static Process StartProcess(ProcessStartInfo startInfo, string commandLine)
-                {
-                    try
-                    {
-                        return
-                            Process.Start(startInfo)
-                            ?? throw new Exception($"Failed to create process.: command-line=\"{commandLine}\"");
-                    }
-                    catch (Exception ex)
-                    {
-                        throw new Exception($"Failed to start process.: command-line=\"{commandLine}\"", ex);
-                    }
-                }
-
-                static void CopyByteStream(ISequentialInputByteStream inStream, ISequentialOutputByteStream outStream)
-                {
-                    Span<byte> buffer = stackalloc byte[1024];
-                    while (true)
-                    {
-                        var length = inStream.Read(buffer);
-                        if (length <= 0)
-                            break;
-                        outStream.WriteBytes(buffer[..length]);
-                    }
-                }
-            }
-        }
-
-        private static readonly string _thisProgramName = typeof(Program).Assembly.GetAssemblyFileNameWithoutExtension();
-        private static readonly char[] _pathDelimiters = new char[] { '/', '\\' };
-
-        static int Main(string[] args)
-        {
             var scriptFilePath = (FilePath?)null;
             var verbose = false;
-            for (var index = 0; index < args.Length; ++index)
+            var logFile = (FilePath?)null;
+            var logWriter = (ISequentialOutputByteStream?)null;
+            var originalStandardOutput = TinyConsole.StandardOutput;
+            var originalStandardError = TinyConsole.StandardError;
+            var newStandardOutput = (ISequentialOutputByteStream?)null;
+            var newStandardError = (ISequentialOutputByteStream?)null;
+            var success = false;
+            try
             {
-                var arg = args[index];
-                if (arg is "-v" or "--verbose")
+                for (var index = 0; index < args.Length; ++index)
                 {
-                    verbose = true;
-                }
-                else if (arg.StartsWith('-'))
-                {
-                    PrintErrorMessage($"A unknown argument is specified.: \"{arg}\"");
-                    PrintUsage();
-                    return 1;
-                }
-                else if (scriptFilePath is not null)
-                {
-                    PrintErrorMessage($"Multiple script files are specified.: \"{scriptFilePath.FullName}\", \"{arg}\"");
-                    PrintUsage();
-                    return 1;
-                }
-                else
-                {
-                    try
+                    var arg = args[index];
+                    if (arg is "-v" or "--verbose")
                     {
-                        scriptFilePath = new FilePath(arg);
-                        if (!scriptFilePath.Exists)
+                        if (verbose)
                         {
-                            PrintErrorMessage($"The specified script file does not exist.: \"{scriptFilePath.FullName}\"");
+                            TinyConsole.WriteLog(LogCategory.Error, "The '-v' option (or the '--verbose' option) is specified multiple times.");
+                            PrintUsage();
+                            return 1;
+                        }
+
+                        verbose = true;
+                    }
+                    else if (arg is "-l" or "--log")
+                    {
+                        if (logFile is not null)
+                            TinyConsole.WriteLog(LogCategory.Error, "The '-l' option (or the '--log' option) is specified multiple times.");
+                        var logDir = DirectoryPath.UserHomeDirectory?.GetSubDirectory(".palmtree")?.GetSubDirectory("bmake")?.GetSubDirectory("log")?.Create();
+                        if (logDir is not null)
+                        {
+                            try
+                            {
+                                (logFile, logWriter) = CreateLogWriter(logDir);
+                                newStandardOutput = originalStandardOutput.WithBranch(logWriter, true);
+                                newStandardError = originalStandardError.WithBranch(logWriter, true);
+                                TinyConsole.StandardOutput = newStandardOutput;
+                                TinyConsole.StandardError = newStandardError;
+                            }
+                            catch (Exception ex)
+                            {
+                                TinyConsole.WriteLog(ex);
+                                PrintUsage();
+                                return 1;
+                            }
+                        }
+                    }
+                    else if (arg.StartsWith('-'))
+                    {
+                        TinyConsole.WriteLog(LogCategory.Error, $"A unknown argument is specified.: \"{arg}\"");
+                        PrintUsage();
+                        return 1;
+                    }
+                    else if (scriptFilePath is not null)
+                    {
+                        TinyConsole.WriteLog(LogCategory.Error, $"Multiple script files are specified.: \"{scriptFilePath.FullName}\", \"{arg}\"");
+                        PrintUsage();
+                        return 1;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            scriptFilePath = new FilePath(arg);
+                            if (!scriptFilePath.Exists)
+                            {
+                                TinyConsole.WriteLog(LogCategory.Error, $"The specified script file does not exist.: \"{scriptFilePath.FullName}\"");
+                                PrintUsage();
+                                return 1;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            TinyConsole.WriteLog(LogCategory.Error, $"The path name of the script file is invalid.: \"{arg}\"");
                             PrintUsage();
                             return 1;
                         }
                     }
-                    catch (Exception)
-                    {
-                        PrintErrorMessage($"The path name of the script file is invalid.: \"{arg}\"");
-                        PrintUsage();
-                        return 1;
-                    }
+                }
+
+                if (scriptFilePath is null)
+                {
+                    TinyConsole.WriteLog(LogCategory.Error, "The path name of the script file is not specified.");
+                    PrintUsage();
+                    return 1;
+                }
+
+                try
+                {
+                    Environment.CurrentDirectory = scriptFilePath.Directory.FullName;
+                    DoProcess(scriptFilePath, verbose);
+                    success = true;
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    TinyConsole.WriteLog(ex);
+                    return 1;
                 }
             }
-
-            if (scriptFilePath is null)
+            finally
             {
-                PrintErrorMessage("The path name of the script file is not specified.");
-                PrintUsage();
-                return 1;
-            }
+                if (logFile is not null || logWriter is not null)
+                {
+                    TinyConsole.Out.Flush();
+                    TinyConsole.Error.Flush();
+                    TinyConsole.StandardOutput = originalStandardOutput;
+                    TinyConsole.StandardError = originalStandardError;
+                    newStandardOutput?.Dispose();
+                    newStandardError?.Dispose();
+                    logWriter?.Dispose();
 
+                    // 失敗時のログのみ残す
+                    if (success)
+                        logFile?.SafetyDelete();
+                }
+            }
+        }
+
+        private static (FilePath logFile, ISequentialOutputByteStream logWriter) CreateLogWriter(DirectoryPath logDir)
+        {
+            var now = DateTime.Now;
             try
             {
-                Environment.CurrentDirectory = scriptFilePath.Directory.FullName;
-                DoProcess(scriptFilePath, verbose);
-                return 0;
+                var logFile = logDir.CreateUniqueFile(prefix: now.ToString("O").Replace(":", "-"), suffix: ".log");
+                var logWriter = logFile.Create();
+                return (logFile, logWriter);
             }
             catch (Exception ex)
             {
-                PrintException(ex);
-                return 1;
+                throw new ApplicationException("The log file could not be created.", ex);
             }
         }
 
@@ -249,14 +177,12 @@ namespace BatchMake.CUI2
                 .AsReadOnlyMemory();
             var headerMarkerPos = FindHeaderMarker(lines);
             if (headerMarkerPos < 0)
-                throw new Exception($"Header marker (e.g. \"# !bmake\") not found.: path=\"{scriptFile.FullName}\"");
+                throw new ApplicationException($"Header marker (e.g. \"# !bmake\") not found.: path=\"{scriptFile.FullName}\"");
             lines = lines[(headerMarkerPos + 1)..];
 
             var nextIndex = ParseDependency(lines, out var dependency);
             if (dependency.Targets.Length <= 0)
-                throw new Exception($"No target specified.: path=\"{scriptFile.FullName}\"");
-            if (dependency.Sources.Length <= 0)
-                throw new Exception($"No source specified.: path=\"{scriptFile.FullName}\"");
+                throw new ApplicationException($"No target specified.: path=\"{scriptFile.FullName}\"");
             if (verbose)
             {
                 var fileDescriptions = Array.Empty<string>().AsEnumerable();
@@ -298,49 +224,51 @@ namespace BatchMake.CUI2
                 }
 
                 foreach (var fileDescription in fileDescriptions)
-                    PrintInformationMessage(fileDescription);
+                    TinyConsole.WriteLog(LogCategory.Information, fileDescription);
             }
 
             var allTargetFilesExist = dependency.Targets.All(file => file.Exists);
             foreach (var sourceFile in dependency.Sources)
             {
                 if (!sourceFile.Exists)
-                    throw new Exception($"The source file does not exist.: \"{sourceFile.FullName}\"");
+                    throw new ApplicationException($"The source file does not exist.: \"{sourceFile.FullName}\"");
             }
 
             var oldestTargetFile = dependency.Targets.Where(file => file.Exists).OrderBy(file => file.LastWriteTimeUtc).FirstOrDefault();
             var newestSourceFile = dependency.Sources.Append(scriptFile).OrderByDescending(file => file.LastWriteTimeUtc).First();
 
-            if (allTargetFilesExist && oldestTargetFile is not null && oldestTargetFile.LastWriteTimeUtc >= newestSourceFile.LastWriteTimeUtc)
+            if (allTargetFilesExist && oldestTargetFile is not null && oldestTargetFile.LastWriteTimeUtc >= newestSourceFile.LastWriteTimeUtc && !dependency.UpdateAlways)
             {
                 if (verbose)
-                    PrintInformationMessage("Because the source file(s) is not newer than the target file(s), the command(s) to update the target file(s) is not executed.");
+                    TinyConsole.WriteLog(LogCategory.Information, "Because the source file(s) is not newer than the target file(s), the command(s) to update the target file(s) is not executed.");
             }
             else
             {
                 if (verbose)
-                    PrintInformationMessage("Because the source file(s) is newer than the target file(s), the command(s) to update the target file(s) is executed.");
+                {
+                    if (dependency.UpdateAlways)
+                        TinyConsole.WriteLog(LogCategory.Information, "Because the target file(s) is always expected to be updated, the command(s) to update the target file(s) is executed.");
+                    else
+                        TinyConsole.WriteLog(LogCategory.Information, "Because the source file(s) is newer than the target file(s), the command(s) to update the target file(s) is executed.");
+                }
+
                 var temporaryFiles = new Dictionary<int, FilePath>();
                 var temporaryDirectories = new Dictionary<int, DirectoryPath>();
+                var success = false;
                 try
                 {
-                    var commandSpecs = ParseCommandLines(lines[nextIndex..], dependency, temporaryFiles, temporaryDirectories, verbose);
-                    if (verbose)
-                    {
-                        foreach (var commandSpec in commandSpecs)
-                        {
-                            if (!commandSpec.IsPipedFromPreviousCommand)
-                                PrintInformationMessage($"Execute command:");
-                            PrintInformationMessage($"{(commandSpec.IsPipedFromPreviousCommand ? "| " : "")}{commandSpec.CommandLine}{(commandSpec.FileRedirectedToStandardInput is not null ? $" < {commandSpec.FileRedirectedToStandardInput.FullName}" : "")}{(commandSpec.FileRedirectedToStandardOutput is not null ? $" > {commandSpec.FileRedirectedToStandardOutput.FullName}" : "")}");
-                        }
-                    }
-
+                    var commandSpecs = ParseCommandLines(lines[nextIndex..], dependency, temporaryFiles, temporaryDirectories, verbose).ToArray();
                     var pipedProcesses = new List<Task>();
-
                     foreach (var commandSpec in commandSpecs)
                     {
-                        var processTask = commandSpec.Start();
-                        pipedProcesses.Add(processTask);
+                        if (verbose)
+                        {
+                            if (!commandSpec.IsPipedFromPreviousCommand)
+                                TinyConsole.WriteLog(LogCategory.Information, $"Execute command:");
+                            TinyConsole.WriteLog(LogCategory.Information, $"{(commandSpec.IsPipedFromPreviousCommand ? "| " : "")}{commandSpec.CommandLine}{(commandSpec.FileRedirectedToStandardInput is not null ? $" < {commandSpec.FileRedirectedToStandardInput.FullName}" : "")}{(commandSpec.FileRedirectedToStandardOutput is null ? "" : $" {(commandSpec.AppendOnRedirecting ? ">>" : ">")} {commandSpec.FileRedirectedToStandardOutput.FullName}")}");
+                        }
+
+                        pipedProcesses.Add(commandSpec.Start());
                         if (!commandSpec.IsPipedToNextCommand)
                         {
                             foreach (var pipedProcess in pipedProcesses)
@@ -351,18 +279,27 @@ namespace BatchMake.CUI2
                 }
                 finally
                 {
+                    if (!success)
+                    {
+                        // 更新処理が失敗した場合にはターゲットファイルをすべて削除する
+
+                        foreach (var targetFile in dependency.Targets)
+                            targetFile.SafetyDelete();
+
+                    }
+
                     foreach (var temporaryFile in temporaryFiles.Values)
                     {
                         temporaryFile.SafetyDelete();
                         if (verbose)
-                            PrintInformationMessage($"Deleted tempprary file \"{temporaryFile.FullName}\"");
+                            TinyConsole.WriteLog(LogCategory.Information, $"Deleted tempprary file \"{temporaryFile.FullName}\"");
                     }
 
                     foreach (var temporaryDirectory in temporaryDirectories.Values)
                     {
                         temporaryDirectory.SafetyDelete(true);
                         if (verbose)
-                            PrintInformationMessage($"Deleted tempprary directory \"{temporaryDirectory.FullName}\"");
+                            TinyConsole.WriteLog(LogCategory.Information, $"Deleted tempprary directory \"{temporaryDirectory.FullName}\"");
                     }
                 }
             }
@@ -382,15 +319,33 @@ namespace BatchMake.CUI2
         private static int ParseDependency(ReadOnlyMemory<string> lines, out Dependency dependency)
         {
             dependency = new Dependency();
+            var state = StateOfParsingDependencyLines.ParsingTargets;
             for (var index = 0; index < lines.Length; ++index)
             {
                 var line = lines.Span[index].Trim();
                 if (line.StartsWith(':'))
                 {
-                    var token = line[1..].TrimStart();
-                    if (token.Length <= 0)
-                        throw new Exception("Syntax error: No source file pathname after ':'.");
-                    dependency.AddSource(CreateFilePath(token));
+                    switch (state)
+                    {
+                        case StateOfParsingDependencyLines.ParsingTargets:
+                        {
+                            state = StateOfParsingDependencyLines.ParsingSources;
+                            var token = line[1..].TrimStart();
+                            if (token.Length > 0)
+                            {
+                                if (token.Equals("!", StringComparison.Ordinal))
+                                    dependency.UpdateAlways = true;
+                                else
+                                    dependency.AddSource(token.CreateFilePath());
+                            }
+
+                            break;
+                        }
+                        case StateOfParsingDependencyLines.ParsingSources:
+                            throw new ApplicationException("Syntax error: The dependency definition contains multiple lines beginning with ':'.");
+                        default:
+                            throw Validation.GetFailErrorException();
+                    }
                 }
                 else if (line.Length <= 0)
                 {
@@ -398,7 +353,22 @@ namespace BatchMake.CUI2
                 }
                 else
                 {
-                    dependency.AddTarget(CreateFilePath(line.Trim()));
+                    switch (state)
+                    {
+                        case StateOfParsingDependencyLines.ParsingTargets:
+                            dependency.AddTarget(line.CreateFilePath());
+                            break;
+                        case StateOfParsingDependencyLines.ParsingSources:
+                        {
+                            if (line.Equals("!", StringComparison.Ordinal))
+                                dependency.UpdateAlways = true;
+                            else
+                                dependency.AddSource(line.CreateFilePath());
+                            break;
+                        }
+                        default:
+                            throw Validation.GetFailErrorException();
+                    }
                 }
             }
 
@@ -408,8 +378,9 @@ namespace BatchMake.CUI2
         private static IEnumerable<CommandSpec> ParseCommandLines(ReadOnlyMemory<string> lines, Dependency dependency, IDictionary<int, FilePath> temporaryFiles, IDictionary<int, DirectoryPath> temporaryDirectories, bool verbose)
         {
             var commandTexts = new List<string>();
-            var redirecttFromStdin = (FilePath?)null;
+            var redirectFromStdin = (FilePath?)null;
             var redirectToStdout = (FilePath?)null;
+            var appendMode = false;
             var pipeFromPreviousCommand = (InProcessPipe?)null;
 
             foreach (var line in Filter(lines))
@@ -417,44 +388,62 @@ namespace BatchMake.CUI2
                 var trimmedLine = EvalueVariable(line.Trim(), dependency, temporaryFiles, temporaryDirectories, verbose);
                 if (trimmedLine.Length <= 0)
                 {
-                    foreach (var commandSpec in Flush(false))
+                    var commandSpec = Flush(false);
+                    if (commandSpec is not null)
                         yield return commandSpec;
                 }
                 else if (trimmedLine.StartsWith('<'))
                 {
-                    if (redirecttFromStdin is not null)
-                        throw new Exception("Duplicate redirection from standard input.");
+                    trimmedLine = trimmedLine[1..].TrimStart();
+                    if (redirectFromStdin is not null)
+                        throw new ApplicationException("Duplicate redirection from standard input.");
                     if (pipeFromPreviousCommand is not null)
-                        throw new Exception("Pipe and redirection conflict.");
-                    if (trimmedLine[1..].TrimStart().Length <= 0)
-                        throw new Exception("No redirection source for standard input is specified.");
-                    redirecttFromStdin = CreateFilePath(trimmedLine.DecodeCommandLineArgument());
+                        throw new ApplicationException("Pipe and redirection conflict.");
+                    if (trimmedLine.Length <= 0)
+                        throw new ApplicationException("No redirection source for standard input is specified.");
+                    redirectFromStdin = trimmedLine.DecodeCommandLineArgument().CreateFilePath();
+                }
+                else if (trimmedLine.StartsWith(">>", StringComparison.Ordinal))
+                {
+                    trimmedLine = trimmedLine[2..].TrimStart();
+                    if (redirectToStdout is not null)
+                        throw new ApplicationException("Duplicate redirection to standard output.");
+                    if (trimmedLine.Length <= 0)
+                        throw new ApplicationException("No redirection destination for standard output is specified.");
+                    redirectToStdout = trimmedLine.DecodeCommandLineArgument().CreateFilePath();
+                    appendMode = true;
                 }
                 else if (trimmedLine.StartsWith('>'))
                 {
+                    trimmedLine = trimmedLine[1..].TrimStart();
                     if (redirectToStdout is not null)
-                        throw new Exception("Duplicate redirection to standard output.");
-                    if (trimmedLine[1..].TrimStart().Length <= 0)
-                        throw new Exception("No redirection destination for standard output is specified.");
-                    redirectToStdout = CreateFilePath(trimmedLine.DecodeCommandLineArgument());
+                        throw new ApplicationException("Duplicate redirection to standard output.");
+                    if (trimmedLine.Length <= 0)
+                        throw new ApplicationException("No redirection destination for standard output is specified.");
+                    redirectToStdout = trimmedLine.DecodeCommandLineArgument().CreateFilePath();
+                    appendMode = false;
                 }
                 else if (trimmedLine.StartsWith('|'))
                 {
-                    foreach (var commandSpec in Flush(true))
+                    var commandSpec = Flush(true);
+                    if (commandSpec is not null)
                         yield return commandSpec;
                 }
                 else
                 {
-                    if (redirecttFromStdin is not null)
-                        throw new Exception("The command is specified after the redirect specification.");
+                    if (redirectFromStdin is not null)
+                        throw new ApplicationException("The command is specified after the redirect specification.");
                     if (redirectToStdout is not null)
-                        throw new Exception("The command is specified after the redirect specification.");
+                        throw new ApplicationException("The command is specified after the redirect specification.");
                     commandTexts.Add(trimmedLine);
                 }
             }
 
-            foreach (var commandSpec in Flush(false))
-                yield return commandSpec;
+            {
+                var commandSpec = Flush(false);
+                if (commandSpec is not null)
+                    yield return commandSpec;
+            }
 
             static IEnumerable<string> Filter(ReadOnlyMemory<string> lines)
             {
@@ -478,239 +467,219 @@ namespace BatchMake.CUI2
                 }
             }
 
-            static string EvalueVariable(string text, Dependency dependency, IDictionary<int, FilePath> temporaryFiles, IDictionary<int,DirectoryPath> temporaryDirectories, bool verbose)
+            static string EvalueVariable(string text, Dependency dependency, IDictionary<int, FilePath> temporaryFiles, IDictionary<int, DirectoryPath> temporaryDirectories, bool verbose)
             {
                 return
-                    GetVariableSpecPattern().Replace(
+                    GetVariablePattern().Replace(
                         text,
                         m =>
                         {
-                            var symbol = m.Groups["symbol"].Value;
-                            var indexGroup = m.Groups["index"];
-                            var optionsGGroup = m.Groups["options"];
+                            var variable = m.Groups["variable"].Value;
+                            var m2 = GetVariableSpecPattern().Match(variable);
+                            if (!m2.Success)
+                                throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                            var symbol = m2.Groups["symbol"].Value;
+                            var indexGroup = m2.Groups["index"];
+                            var optionsGGroup = m2.Groups["options"];
                             var index = indexGroup.Success ? int.Parse(indexGroup.Value, NumberStyles.None, CultureInfo.InvariantCulture.NumberFormat) : (int?)null;
                             var options = optionsGGroup.Success ? optionsGGroup.Value.Split(':').AsReadOnlySpan(1) : [];
                             switch (symbol)
                             {
                                 case "target":
+                                {
                                     if (index is not null)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (options.Length > 0)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (dependency.Targets.Length != 1)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
-                                    return ShortenFilePathNames(dependency.Targets[0]).EncodeCommandLineArgument();
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    return dependency.Targets[0].ShortenFilePathNames().EncodeCommandLineArgument();
+                                }
                                 case "targets":
+                                {
                                     if (index is null)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (options.Length > 0)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (index.Value > dependency.Targets.Length)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
-                                    return ShortenFilePathNames(dependency.Targets[index.Value - 1]).EncodeCommandLineArgument();
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    return dependency.Targets[index.Value - 1].ShortenFilePathNames().EncodeCommandLineArgument();
+                                }
                                 case "source":
+                                {
                                     if (index is not null)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (options.Length > 0)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (dependency.Sources.Length != 1)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
-                                    return ShortenFilePathNames(dependency.Sources[0]).EncodeCommandLineArgument();
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    return dependency.Sources[0].ShortenFilePathNames().EncodeCommandLineArgument();
+                                }
                                 case "sources":
+                                {
                                     if (index is null)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (options.Length > 0)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (index.Value > dependency.Sources.Length)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
-                                    return ShortenFilePathNames(dependency.Sources[index.Value - 1]).EncodeCommandLineArgument();
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    return dependency.Sources[index.Value - 1].ShortenFilePathNames().EncodeCommandLineArgument();
+                                }
                                 case "temp-file":
+                                {
                                     if (index is null)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
-                                    if (options.Length > 0)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
-                                    if (!temporaryFiles.TryGetValue(index.Value, out var temporaryFile))
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    if (options.Length > 1)
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    if (options.Length > 0 && (options[0].Length < 2 || !options[0].StartsWith('.') || options[0].IndexOf('.', 1) > 0 || options[0].IndexOfAny(_pathDelimiters) > 0))
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    if (temporaryFiles.TryGetValue(index.Value, out var temporaryFile))
                                     {
-                                        temporaryFile = FilePath.CreateTemporaryFile();
+                                        if (options[0].Length > 0 && !temporaryFile.Extension.Equals(options[0], StringComparison.Ordinal))
+                                            throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
+                                    }
+                                    else
+                                    {
+                                        temporaryFile =
+                                            options[0].Length > 0
+                                            ? FilePath.CreateTemporaryFile(suffix: options[0])
+                                            : FilePath.CreateTemporaryFile();
                                         temporaryFiles.Add(index.Value, temporaryFile);
                                         if (verbose)
-                                            PrintInformationMessage($"Created temprary file \"{temporaryFile.FullName}\".");
+                                            TinyConsole.WriteLog(LogCategory.Information, $"Created temprary file \"{temporaryFile.FullName}\".");
                                     }
 
-                                    return ShortenFilePathNames(temporaryFile).EncodeCommandLineArgument();
+                                    return temporaryFile.ShortenFilePathNames().EncodeCommandLineArgument();
+                                }
                                 case "temp-dir":
+                                {
                                     if (index is null)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (options.Length > 1)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (options.Length > 0 && options[0].IndexOfAny(_pathDelimiters) > 0)
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                                     if (!temporaryDirectories.TryGetValue(index.Value, out var temporaryDirectory))
                                     {
                                         temporaryDirectory = DirectoryPath.CreateTemporaryDirectory();
                                         temporaryDirectories.Add(index.Value, temporaryDirectory);
                                         if (verbose)
-                                            PrintInformationMessage($"Created temprary directory \"{temporaryDirectory.FullName}\".");
+                                            TinyConsole.WriteLog(LogCategory.Information, $"Created temprary directory \"{temporaryDirectory.FullName}\".");
                                     }
 
                                     try
                                     {
                                         return
                                             options.Length > 0
-                                            ? ShortenFilePathNames(temporaryDirectory.GetFile(options[0])).EncodeCommandLineArgument()
-                                            : ShortenFilePathNames(temporaryDirectory).EncodeCommandLineArgument();
+                                            ? temporaryDirectory.GetFile(options[0]).ShortenFilePathNames().EncodeCommandLineArgument()
+                                            : temporaryDirectory.ShortenFilePathNames().EncodeCommandLineArgument();
                                     }
                                     catch (Exception ex)
                                     {
-                                        throw new Exception($"An invalid variable is specified.: \"{m.Value}\"", ex);
+                                        throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"", ex);
                                     }
-
+                                }
                                 default:
-                                    throw new Exception($"An invalid variable is specified.: \"{m.Value}\"");
+                                    throw new ApplicationException($"An invalid variable is specified.: \"{m.Value}\"");
                             }
                         });
             }
 
-            IEnumerable<CommandSpec> Flush(bool isPipedToNextCommand)
+            CommandSpec? Flush(bool isPipedToNextCommand)
             {
                 if (commandTexts.Count <= 0)
                 {
-                    if (redirecttFromStdin is not null || redirectToStdout is not null)
-                        throw new Exception("No command precedes the redirection.");
+                    if (redirectFromStdin is not null || redirectToStdout is not null)
+                        throw new ApplicationException("No command precedes the redirection.");
                     if (pipeFromPreviousCommand is not null)
-                        throw new Exception("The command to which the pipe is connected is not specified.");
+                        throw new ApplicationException("The command to which the pipe is connected is not specified.");
                     if (isPipedToNextCommand)
-                        throw new Exception("The command to which the pipe is connected is not specified.");
+                        throw new ApplicationException("The command to which the pipe is connected is not specified.");
+                    return null;
                 }
                 else
                 {
                     var isPipedFromPreviousCommand = pipeFromPreviousCommand is not null;
-                    if (redirecttFromStdin is not null && isPipedFromPreviousCommand)
-                        throw new Exception("Pipe and redirection conflict.");
+                    if (redirectFromStdin is not null && isPipedFromPreviousCommand)
+                        throw new ApplicationException("Pipe and redirection conflict.");
                     if (redirectToStdout is not null && isPipedToNextCommand)
-                        throw new Exception("Pipe and redirection conflict.");
-
-                    yield return
-                        new CommandSpec(
+                        throw new ApplicationException("Pipe and redirection conflict.");
+                    var commandSpec =
+                        CommandSpec.CreateInstance(
                             string.Join(" ", commandTexts),
-                            OpenStdin(),
-                            OpenStdout(isPipedToNextCommand),
+                            GetStandardInputOpener(),
+                            GetStandardOutputOpener(isPipedToNextCommand, appendMode),
                             isPipedFromPreviousCommand,
                             isPipedToNextCommand,
-                            redirecttFromStdin,
-                            redirectToStdout);
-
+                            redirectFromStdin,
+                            redirectToStdout,
+                            appendMode);
                     commandTexts.Clear();
-                    redirecttFromStdin = null;
+                    redirectFromStdin = null;
                     redirectToStdout = null;
+                    appendMode = false;
+                    return commandSpec;
                 }
             }
 
-            ISequentialInputByteStream? OpenStdin()
-                => pipeFromPreviousCommand?.OpenInputStream() ?? redirecttFromStdin?.OpenRead();
+            Func<ISequentialInputByteStream>? GetStandardInputOpener()
+            {
+                if (pipeFromPreviousCommand is not null)
+                {
+                    var pipe = pipeFromPreviousCommand;
+                    return pipe.OpenInputStream;
+                }
+                else if (redirectFromStdin is not null)
+                {
+                    var sourceFile = redirectFromStdin;
+                    return GetDestinationFileOpener(sourceFile);
+                }
+                else
+                {
+                    return null;
+                }
 
-            ISequentialOutputByteStream? OpenStdout(bool isPipedToNextCommand)
+                static Func<ISequentialInputByteStream> GetDestinationFileOpener(FilePath sourceFile)
+                {
+                    return () => sourceFile.OpenRead();
+                }
+            }
+
+            Func<ISequentialOutputByteStream>? GetStandardOutputOpener(bool isPipedToNextCommand, bool appendMode)
             {
                 if (isPipedToNextCommand)
                 {
                     pipeFromPreviousCommand = new InProcessPipe();
-                    return pipeFromPreviousCommand.OpenOutputStream();
+                    var pipe = pipeFromPreviousCommand;
+                    return pipe.OpenOutputStream;
                 }
                 else if (redirectToStdout is not null)
                 {
                     pipeFromPreviousCommand = null;
-                    return redirectToStdout.Create();
+                    return GetDestinationFileOpener(redirectToStdout, appendMode);
                 }
                 else
                 {
                     pipeFromPreviousCommand = null;
                     return null;
                 }
-            }
-        }
 
-        private static string ShortenFilePathNames(FilePath path)
-        {
-            var relativePath = path.GetRelativePath(DirectoryPath.CurrentDirectory);
-            return
-                relativePath is not null && relativePath.Length < path.FullName.Length
-                ? relativePath
-                : path.FullName;
-        }
-
-        private static string ShortenFilePathNames(DirectoryPath path)
-        {
-            var relativePath = path.GetRelativePath(DirectoryPath.CurrentDirectory);
-            return
-                relativePath is not null && relativePath.Length < path.FullName.Length
-                ? relativePath
-                : path.FullName;
-        }
-
-        private static FilePath CreateFilePath(string path)
-        {
-            try
-            {
-                return new FilePath(path);
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Invalid path name.: \"{path}\"", ex);
-            }
-        }
-
-        private static DirectoryPath CreateDirectoryPath(string path)
-        {
-            try
-            {
-                return new DirectoryPath(path);
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Invalid path name.: \"{path}\"", ex);
-            }
-        }
-
-        private static void PrintUsage() => PrintInformationMessage("Usage: bmake [-v | --verbose] <script file path name>");
-
-        private static void PrintException(Exception ex, int indent = 0)
-        {
-            lock (_thisProgramName)
-            {
-                PrintErrorMessage(ex.Message);
-                if (ex.InnerException is not null)
-                    PrintException(ex.InnerException, indent + 1);
-                if (ex is AggregateException aggregateException)
+                static Func<ISequentialOutputByteStream> GetDestinationFileOpener(FilePath destinationFile, bool doAppend)
                 {
-                    foreach (var innerException in aggregateException.InnerExceptions)
-                        PrintException(innerException, indent + 1);
+                    return () => doAppend ? destinationFile.Append() : destinationFile.Create();
                 }
             }
         }
 
-        private static void PrintInformationMessage(string message, int indent = 0) => PrintMessage("INFO", ConsoleColor.Cyan, message, indent);
-
-        private static void PrintWarningMessage(string message, int indent = 0) => PrintMessage("WARNING", ConsoleColor.Yellow, message, indent);
-
-        private static void PrintErrorMessage(string message, int indent = 0) => PrintMessage("ERROR", ConsoleColor.Red, message, indent);
-
-        private static void PrintMessage(string category, ConsoleColor foregroundColor, string message, int indent = 0)
-        {
-            lock (_thisProgramName)
-            {
-                var currentForeGroundColor = TinyConsole.ForegroundColor;
-                TinyConsole.Write($"{new string(' ', indent << 1)}{_thisProgramName}:");
-                TinyConsole.ForegroundColor = foregroundColor;
-                TinyConsole.Write(category);
-                TinyConsole.ForegroundColor = currentForeGroundColor;
-                TinyConsole.WriteLine($":{message}");
-            }
-        }
+        private static void PrintUsage() => TinyConsole.WriteLog(LogCategory.Information, $"Usage: {Validation.DefaultApplicationName} [-v | --verbose] <script file path name>");
 
         [GeneratedRegex(@"^# +!(/bin|/usr/bin|/usr/local/bin)?bmake *$", RegexOptions.Compiled | RegexOptions.ExplicitCapture)]
         private static partial Regex GetHeaderMarkerPattern();
 
-        [GeneratedRegex(@"\${(?<symbol>[a-z\-]+)(-(?<index>\d+))?(?<options>(:[^:}]+)*)}", RegexOptions.Compiled | RegexOptions.ExplicitCapture)]
+        [GeneratedRegex(@"^(?<symbol>[a-z\-]+)(-(?<index>\d+))?(?<options>(:[^:}]+)*)$", RegexOptions.Compiled | RegexOptions.ExplicitCapture)]
         private static partial Regex GetVariableSpecPattern();
+
+        [GeneratedRegex(@"\${(?<variable>[^}]+)}", RegexOptions.Compiled | RegexOptions.ExplicitCapture)]
+        private static partial Regex GetVariablePattern();
     }
 }

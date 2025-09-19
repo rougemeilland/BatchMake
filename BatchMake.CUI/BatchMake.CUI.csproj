@@ -7,30 +7,17 @@
     <Nullable>enable</Nullable>
     <EnforceCodeStyleInBuild>True</EnforceCodeStyleInBuild>
     <AssemblyName>bmake</AssemblyName>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net9.0|AnyCPU'">
+    <TieredCompilationQuickJit>false</TieredCompilationQuickJit>
     <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>1701;1702;IDE0300;IDE0305;IDE0290</NoWarn>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net8.0|AnyCPU'">
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>1701;1702;IDE0300;IDE0305;IDE0290</NoWarn>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|net9.0|AnyCPU'">
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>1701;1702;IDE0300;IDE0305;IDE0290</NoWarn>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|net8.0|AnyCPU'">
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>1701;1702;IDE0300;IDE0305;IDE0290</NoWarn>
+    <PublishTrimmed>True</PublishTrimmed>
+    <PublishAot>True</PublishAot>
   </PropertyGroup>
 
   <ItemGroup>
     <Content Include="test1.bat">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="test3.bat">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="test2.bat">
@@ -39,9 +26,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Palmtree.Core" Version="1.17.0-alpha" />
-    <PackageReference Include="Palmtree.IO" Version="1.15.0-alpha" />
-    <PackageReference Include="Palmtree.IO.Console" Version="1.5.11-alpha" />
+    <PackageReference Include="Palmtree.Core" Version="1.19.1-alpha" />
+    <PackageReference Include="Palmtree.IO" Version="1.19.2-alpha" />
+    <PackageReference Include="Palmtree.IO.Console" Version="1.7.2-alpha" />
   </ItemGroup>
 
 </Project>
